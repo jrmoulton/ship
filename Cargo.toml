@@ -11,3 +11,4 @@ semver_rs = "0.2"
 serde = { version = "1.0", features = ["derive"] }
 git2 = "0.13"
 regex = "1.5.4"
+fs_extra = "1.2.0"

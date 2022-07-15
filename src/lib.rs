@@ -11,15 +11,15 @@ use std::path::Path;
 
 #[derive(Debug, Deserialize)]
 struct Config {
-    package: Option<PackageConfig>,
+    _package: Option<PackageConfig>,
     dependencies: Option<HashMap<String, DepType>>,
 }
 
 #[derive(Debug, Deserialize)]
 struct PackageConfig {
-    name: Option<String>,
-    version: Option<String>,
-    authors: Option<Vec<String>>,
+    _name: Option<String>,
+    _version: Option<String>,
+    _authors: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -35,8 +35,15 @@ enum DepType {
     },
     Version(String),
 }
-
+//
 fn build_fo() -> FetchOptions<'static> {
+    let cb = build_cb();
+    let mut fo = FetchOptions::new();
+    fo.remote_callbacks(cb);
+    fo
+}
+
+fn build_cb() -> RemoteCallbacks<'static> {
     let mut cb = RemoteCallbacks::new();
     cb.credentials(|_url, username_from_url, _allowed_types| {
         Cred::ssh_key(
@@ -46,9 +53,7 @@ fn build_fo() -> FetchOptions<'static> {
             None,
         )
     });
-    let mut fo = FetchOptions::new();
-    fo.remote_callbacks(cb);
-    fo
+    cb
 }
 
 fn clone(url: &str, path: &Path, name: &str) -> Result<Repository, git2::Error> {
@@ -58,14 +63,44 @@ fn clone(url: &str, path: &Path, name: &str) -> Result<Repository, git2::Error> 
     builder.clone(url, path)
 }
 
-fn update<'a>(name: &str) -> Result<&'a str, git2::Error> {
-    let repo = git2::Repository::open(format!("ui/deps/{}", name)).unwrap();
-    repo.find_remote("origin")
-        .unwrap()
-        .fetch(&["main"], Some(&mut build_fo()), None)
-        .unwrap();
-    repo.find_remote("origin").unwrap().get_refspec(1);
-    repo.find_reference(name);
+fn update<'a>(name: &str, version: Option<String>) -> Result<&'a str, git2::Error> {
+    let repo = git2::Repository::open(format!("ui/deps/{}", name))?;
+    let mut remote = repo.find_remote("origin")?;
+    let cb = build_cb();
+    remote.connect_auth(git2::Direction::Fetch, Some(cb), None)?;
+    let remote_branch = remote.default_branch()?;
+    remote.fetch(
+        &[remote_branch.as_str().unwrap()],
+        Some(&mut build_fo()),
+        None,
+    )?;
+
+    match version {
+        // To speed things up here if the references match just return
+        Some(version) => {
+            // Set head detatched(annotatedComit)
+            let commit = repo.revparse_single(&version)?;
+            repo.checkout_tree(
+                &commit,
+                Some(git2::build::CheckoutBuilder::new().update_index(true)),
+            )?;
+        }
+        None => {
+            let remote_branch_string = remote_branch.as_str().unwrap().clone();
+            let re = Regex::new(r"[^/]+$").unwrap();
+            let remote_branch_string = re.captures(remote_branch_string).unwrap();
+            repo.set_head(&format!(
+                "refs/remotes/origin/{}",
+                remote_branch_string[0].to_owned()
+            ))?;
+            repo.checkout_head(Some(
+                git2::build::CheckoutBuilder::new()
+                    .update_index(true)
+                    .force(),
+            ))?;
+        }
+    }
+    repo.checkout_index(None, Some(git2::build::CheckoutBuilder::new().force()))?;
     dbg!("Fetch Complete");
     Ok("Fetch Complete")
 }
@@ -89,44 +124,44 @@ fn handle_dep(dep: (String, DepType)) -> String {
                 let git = re.replace_all(&git, r".com:");
                 let re = Regex::new(r"https?://").unwrap();
                 let git = re.replace(&git, "");
-                if version.is_some() {
-                    let _ = 5 + 5;
-                }
-                if let Err(e) = clone(
+                clone(
                     &format!("git@{}", git),
                     Path::new(&path_to_dep),
                     &package_name,
-                ) {
-                    // If there is an error when cloning
-                    panic!("{}", e);
-                };
-                // if let Some(version) = version {};
+                )
+                .unwrap();
             } else {
                 // If the folder already exists
-                if let Err(e) = update(&package_name) {
-                    panic!("{}", e);
-                }
+                update(&package_name, version).unwrap();
             }
         }
         DepType::TablePath { path, version } => {
-            dbg!(path, version);
+            if !Path::new(&path_to_dep).is_dir() {
+                let path_to_dep = "ui/deps/";
+                std::fs::create_dir_all(&path_to_dep).unwrap();
+                fs_extra::dir::copy(path, path_to_dep, &fs_extra::dir::CopyOptions::new()).unwrap();
+                if version.is_some() {
+                    update(&package_name, version).unwrap();
+                }
+            } else {
+                // Here I need to check a .lock file to check that the last copy option was as a path
+                // not a git.
+                let mut copy_options = fs_extra::dir::CopyOptions::new();
+                copy_options.overwrite = true;
+                fs_extra::dir::copy(path, path_to_dep, &copy_options).unwrap();
+                if version.is_some() {
+                    update(&package_name, version).unwrap();
+                }
+            }
         }
         DepType::Version(version) => {
             dbg!(package_name, version);
         }
     }
-    // if !Path::new(&path_to_dep).is_dir() {
-    // if let Some(git) = &dep_type.git {
-    //     let re = Regex::new(r".com/").unwrap();
-    //     let git = re.replace_all(git, r".com:");
-    //     if let Err(e) = clone(&format!("git@{}", git), Path::new(&path_to_dep)) {
-    //         println!("{}", e);
-    // }
-
     String::from("this")
 }
 
-fn main() {
+pub fn run() {
     let decoded: Config = toml::from_str(&std::fs::read_to_string("ui.toml").unwrap()).unwrap();
     let deps = decoded.dependencies.unwrap();
     for dep in deps {
